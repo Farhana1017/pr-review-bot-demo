@@ -16,7 +16,7 @@ import anthropic
 # ─────────────────────────────────────────────
 
 CLAUDE_MODEL = "claude-sonnet-4-5"
-MAX_TOKENS = 2000
+MAX_TOKENS = 8192        # increased from 2000 to prevent JSON truncation on large diffs
 MAX_DIFF_CHARS = 15000   # trim huge diffs so we stay within context limits
 
 SYSTEM_PROMPT_CSHARP = """
@@ -155,16 +155,37 @@ def pick_system_prompt(lang: str) -> str:
 
 def parse_review(raw: str) -> dict:
     """Parse JSON from Claude's response, stripping any accidental fences."""
+    import re
     cleaned = raw.strip()
-    for fence in ("```json", "```"):
-        cleaned = cleaned.replace(fence, "")
-    cleaned = cleaned.strip()
+
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    else:
+        for fence in ("```json", "```"):
+            cleaned = cleaned.replace(fence, "")
+        cleaned = cleaned.strip()
+
     # Find the outermost { ... }
     start = cleaned.find("{")
     end   = cleaned.rfind("}") + 1
     if start == -1 or end == 0:
         raise ValueError("No JSON object found in Claude response")
-    return json.loads(cleaned[start:end])
+
+    json_str = cleaned[start:end]
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as exc:
+        # Response was likely truncated — try to recover by closing open structures
+        print(f"⚠️  JSON parse failed ({exc}), attempting recovery…", file=sys.stderr)
+        recovered = re.sub(r',?\s*\{[^{}]*$', '', json_str)   # remove incomplete last object
+        if '"issues"' in recovered and not recovered.rstrip().endswith(']'):
+            recovered = recovered.rstrip().rstrip(',') + ']'
+        if not recovered.rstrip().endswith('}'):
+            recovered += '}'
+        return json.loads(recovered)   # raises if still broken
 
 
 def build_summary_table(review: dict) -> str:
@@ -300,13 +321,14 @@ def main():
     )
 
     raw_response = message.content[0].text
+    print("Raw response:\n", raw_response)   # always log for debugging
 
     # ── 4. Parse response ────────────────────
     try:
         review = parse_review(raw_response)
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR parsing Claude response: {exc}", file=sys.stderr)
-        print("Raw response:\n", raw_response, file=sys.stderr)
+        print(f"Response length: {len(raw_response)} chars — consider raising MAX_TOKENS if truncated", file=sys.stderr)
         sys.exit(1)
 
     # ── 5. Post or print ─────────────────────
