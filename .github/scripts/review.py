@@ -16,7 +16,7 @@ import anthropic
 # ─────────────────────────────────────────────
 
 CLAUDE_MODEL = "claude-sonnet-4-5"
-MAX_TOKENS = 8192        # increased from 2000 to prevent JSON truncation on large diffs
+MAX_TOKENS = 16000       # large value to prevent JSON truncation on complex diffs
 MAX_DIFF_CHARS = 15000   # trim huge diffs so we stay within context limits
 
 SYSTEM_PROMPT_CSHARP = """
@@ -180,12 +180,103 @@ def parse_review(raw: str) -> dict:
     except json.JSONDecodeError as exc:
         # Response was likely truncated — try to recover by closing open structures
         print(f"⚠️  JSON parse failed ({exc}), attempting recovery…", file=sys.stderr)
-        recovered = re.sub(r',?\s*\{[^{}]*$', '', json_str)   # remove incomplete last object
-        if '"issues"' in recovered and not recovered.rstrip().endswith(']'):
-            recovered = recovered.rstrip().rstrip(',') + ']'
-        if not recovered.rstrip().endswith('}'):
-            recovered += '}'
+        recovered = _repair_truncated_json(json_str)
+        print(f"⚠️  Recovered JSON (first 200 chars): {recovered[:200]}", file=sys.stderr)
         return json.loads(recovered)   # raises if still broken
+
+
+def _repair_truncated_json(s: str) -> str:
+    """
+    Best-effort repair of a truncated JSON string by:
+    1. Removing any incomplete trailing object or string value.
+    2. Closing any unclosed arrays and objects.
+    """
+    import re
+
+    # Step 1: truncate at the last complete top-level field value.
+    # Find the last safely-terminated value boundary: end of }, ], true, false, null, or a quoted string.
+    # Walk backwards from the end dropping chars until json.loads succeeds or we close open brackets.
+
+    # Count unclosed brackets to know what to close
+    def count_open(text):
+        """Return (unclosed_braces, unclosed_brackets) ignoring content inside strings."""
+        open_braces = 0
+        open_brackets = 0
+        in_string = False
+        escape = False
+        for ch in text:
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                open_braces += 1
+            elif ch == '}':
+                open_braces -= 1
+            elif ch == '[':
+                open_brackets += 1
+            elif ch == ']':
+                open_brackets -= 1
+        return open_braces, open_brackets
+
+    # Remove any trailing incomplete string (unclosed quote) and incomplete object/array element
+    # Strip trailing comma and partial token after last complete comma-separated value
+    # Strategy: repeatedly strip from end until last char is one of: }, ], ", digit, true, false, null
+    trimmed = s.rstrip()
+
+    # Remove incomplete last item: cut back to the last ',' or '[' or '{' at the top level
+    # Simple heuristic: find last occurrence of complete value ending (}, ], or quoted string end)
+    # then close remaining open structures.
+
+    # Find the rightmost position where a complete value ends outside a string
+    last_good = len(trimmed)
+    in_string = False
+    escape_next = False
+    depth = 0
+    last_complete_pos = 0
+
+    for i, ch in enumerate(trimmed):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            if not in_string:
+                # end of a string — mark position if depth makes sense
+                last_complete_pos = i + 1
+            continue
+        if in_string:
+            continue
+        if ch in ('{', '['):
+            depth += 1
+        elif ch in ('}', ']'):
+            depth -= 1
+            last_complete_pos = i + 1
+        elif ch == ',' and depth <= 2:
+            # after a comma at shallow depth, prior content was complete
+            last_complete_pos = i  # don't include the comma yet
+
+    # Use last_complete_pos to truncate if it's before the end (i.e., trailing content was bad)
+    cut = trimmed[:last_complete_pos].rstrip().rstrip(',')
+
+    # Now close any unclosed arrays/objects
+    open_braces, open_brackets = count_open(cut)
+
+    # Close open brackets first (they are inner), then braces
+    closing = ']' * max(0, open_brackets) + '}' * max(0, open_braces)
+    repaired = cut + closing
+
+    return repaired
 
 
 def build_summary_table(review: dict) -> str:
