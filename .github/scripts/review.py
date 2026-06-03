@@ -22,6 +22,7 @@ MAX_DIFF_CHARS = 15000   # trim huge diffs so we stay within context limits
 SYSTEM_PROMPT_CSHARP = """
 You are a senior .NET / C# and SQL Server engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
+IMPORTANT: All string values in the JSON must be on a single line. Escape any newlines as \\n, any double-quotes as \\", and any backslashes as \\\\ within string values. Do NOT include raw newlines or unescaped characters inside JSON strings.
 
 Focus especially on:
 - SQL injection via string concatenation (must use parameterised queries / sp_executesql)
@@ -61,6 +62,7 @@ Return exactly this JSON structure:
 SYSTEM_PROMPT_SQL = """
 You are a senior SQL Server / T-SQL database engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
+IMPORTANT: All string values in the JSON must be on a single line. Escape any newlines as \\n, any double-quotes as \\", and any backslashes as \\\\ within string values. Do NOT include raw newlines or unescaped characters inside JSON strings.
 
 Focus especially on:
 - Dynamic SQL built with string concatenation (sp_executesql with parameters is the correct pattern)
@@ -97,6 +99,7 @@ Return exactly this JSON structure:
 SYSTEM_PROMPT_GENERAL = """
 You are a senior software engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
+IMPORTANT: All string values in the JSON must be on a single line. Escape any newlines as \\n, any double-quotes as \\", and any backslashes as \\\\ within string values. Do NOT include raw newlines or unescaped characters inside JSON strings.
 
 Focus on: security vulnerabilities, logic errors, performance issues, missing error handling,
 code style, maintainability, and documentation gaps.
@@ -153,6 +156,43 @@ def pick_system_prompt(lang: str) -> str:
     }.get(lang, SYSTEM_PROMPT_GENERAL)
 
 
+def _sanitize_json_strings(s: str) -> str:
+    """
+    Replace literal control characters (newline, carriage return, tab)
+    inside JSON string values with their proper JSON escape sequences.
+    Claude sometimes emits raw newlines inside string values (e.g. in
+    multi-line 'suggestion' fields), which makes json.loads fail.
+    """
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            result.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if in_string:
+            if ch == '\n':
+                result.append('\\n')
+                continue
+            if ch == '\r':
+                result.append('\\r')
+                continue
+            if ch == '\t':
+                result.append('\\t')
+                continue
+        result.append(ch)
+    return ''.join(result)
+
+
 def parse_review(raw: str) -> dict:
     """Parse JSON from Claude's response, stripping any accidental fences."""
     import re
@@ -174,6 +214,9 @@ def parse_review(raw: str) -> dict:
         raise ValueError("No JSON object found in Claude response")
 
     json_str = cleaned[start:end]
+
+    # Sanitize literal control characters inside JSON string values
+    json_str = _sanitize_json_strings(json_str)
 
     try:
         return json.loads(json_str)
