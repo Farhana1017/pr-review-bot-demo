@@ -1,0 +1,49 @@
+name: Claude PR Review
+
+# Triggers on every PR open or new push to an existing PR
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    # Optionally restrict to specific file paths:
+    # paths:
+    #   - "**/*.cs"
+    #   - "**/*.sql"
+
+jobs:
+  claude-review:
+    name: Claude Code Review
+    runs-on: ubuntu-latest
+
+    # Required so the Action can post a PR review comment
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # ── 1. Check out the full history so git diff works ──────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history needed for git diff base...head
+
+      # ── 2. Set up Python ─────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ── 3. Install dependencies ───────────────────────────────────────
+      - name: Install dependencies
+        run: pip install anthropic requests
+
+      # ── 4. Run the review script ──────────────────────────────────────
+      - name: Run Claude review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}      # auto-provided by GitHub
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER:         ${{ github.event.pull_request.number }}
+          PR_TITLE:          ${{ github.event.pull_request.title }}
+          BASE_SHA:          ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA:          ${{ github.event.pull_request.head.sha }}
+        run: python .github/scripts/review.py
