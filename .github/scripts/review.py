@@ -16,13 +16,19 @@ import anthropic
 # ─────────────────────────────────────────────
 
 CLAUDE_MODEL = "claude-sonnet-4-5"
-MAX_TOKENS = 16000       # large value to prevent JSON truncation on complex diffs
+MAX_TOKENS = 8096        # Sonnet 4.5 real output ceiling is 8192; leave a small buffer
 MAX_DIFF_CHARS = 15000   # trim huge diffs so we stay within context limits
 
 SYSTEM_PROMPT_CSHARP = """
 You are a senior .NET / C# and SQL Server engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
-IMPORTANT: All string values in the JSON must be on a single line. Escape any newlines as \\n, any double-quotes as \\", and any backslashes as \\\\ within string values. Do NOT include raw newlines or unescaped characters inside JSON strings.
+
+CRITICAL JSON RULES - YOU MUST FOLLOW THESE:
+1. Return ONLY raw JSON. No markdown fences, no ```json, no explanation.
+2. Every string value MUST be on a single line - absolutely no literal newlines inside strings.
+3. In 'suggestion' fields: escape ALL newlines as \\n, ALL double-quotes as \\", ALL backslashes as \\\\.
+4. Code examples in suggestions must be written as a single line with \\n for line breaks.
+5. Do not include raw code blocks inside JSON strings.
 
 Focus especially on:
 - SQL injection via string concatenation (must use parameterised queries / sp_executesql)
@@ -51,18 +57,24 @@ Return exactly this JSON structure:
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Bug" | "Performance" | "Dispose/IDisposable" | "Async" | "DI/IoC" | "Style" | "Error Handling" | "Architecture" | "Documentation" | "T-SQL",
       "message": "Clear description of the issue",
-      "suggestion": "Concrete fix with example code where helpful"
+      "suggestion": "Concrete fix with example code where helpful - use \\n for line breaks in code"
     }
   ],
   "positives": ["things done well"],
-  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables)"
+  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables) - use \\n for line breaks"
 }
 """
 
 SYSTEM_PROMPT_SQL = """
 You are a senior SQL Server / T-SQL database engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
-IMPORTANT: All string values in the JSON must be on a single line. Escape any newlines as \\n, any double-quotes as \\", and any backslashes as \\\\ within string values. Do NOT include raw newlines or unescaped characters inside JSON strings.
+
+CRITICAL JSON RULES - YOU MUST FOLLOW THESE:
+1. Return ONLY raw JSON. No markdown fences, no ```json, no explanation.
+2. Every string value MUST be on a single line - absolutely no literal newlines inside strings.
+3. In 'suggestion' fields: escape ALL newlines as \\n, ALL double-quotes as \\", ALL backslashes as \\\\.
+4. Code examples in suggestions must be written as a single line with \\n for line breaks.
+5. Do not include raw code blocks inside JSON strings.
 
 Focus especially on:
 - Dynamic SQL built with string concatenation (sp_executesql with parameters is the correct pattern)
@@ -88,18 +100,24 @@ Return exactly this JSON structure:
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Performance" | "Missing Index" | "Transaction" | "Error Handling" | "Style" | "Best Practice" | "Dynamic SQL",
       "message": "Clear description of the T-SQL-specific issue",
-      "suggestion": "Concrete T-SQL fix or pattern"
+      "suggestion": "Concrete T-SQL fix or pattern - use \\n for line breaks in code"
     }
   ],
   "positives": ["things done well"],
-  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables)"
+  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables) - use \\n for line breaks"
 }
 """
 
 SYSTEM_PROMPT_GENERAL = """
 You are a senior software engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
-IMPORTANT: All string values in the JSON must be on a single line. Escape any newlines as \\n, any double-quotes as \\", and any backslashes as \\\\ within string values. Do NOT include raw newlines or unescaped characters inside JSON strings.
+
+CRITICAL JSON RULES - YOU MUST FOLLOW THESE:
+1. Return ONLY raw JSON. No markdown fences, no ```json, no explanation.
+2. Every string value MUST be on a single line - absolutely no literal newlines inside strings.
+3. In 'suggestion' fields: escape ALL newlines as \\n, ALL double-quotes as \\", ALL backslashes as \\\\.
+4. Code examples in suggestions must be written as a single line with \\n for line breaks.
+5. Do not include raw code blocks inside JSON strings.
 
 Focus on: security vulnerabilities, logic errors, performance issues, missing error handling,
 code style, maintainability, and documentation gaps.
@@ -115,11 +133,11 @@ Return exactly this JSON structure:
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Bug" | "Performance" | "Style" | "Error Handling" | "Logic" | "Documentation",
       "message": "Clear description of the issue",
-      "suggestion": "Concrete fix or improvement"
+      "suggestion": "Concrete fix or improvement - use \\n for line breaks in code"
     }
   ],
   "positives": ["things done well"],
-  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables)"
+  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables) - use \\n for line breaks"
 }
 """
 
@@ -158,14 +176,14 @@ def pick_system_prompt(lang: str) -> str:
 
 def _sanitize_json_strings(s: str) -> str:
     """
-    Replace literal control characters (newline, carriage return, tab)
-    inside JSON string values with their proper JSON escape sequences.
-    Claude sometimes emits raw newlines inside string values (e.g. in
-    multi-line 'suggestion' fields), which makes json.loads fail.
+    Replace literal control characters inside JSON string values with proper
+    JSON escape sequences. Also auto-closes an unclosed string if the response
+    was truncated mid-value.
     """
     result = []
     in_string = False
     escape_next = False
+
     for ch in s:
         if escape_next:
             result.append(ch)
@@ -183,13 +201,21 @@ def _sanitize_json_strings(s: str) -> str:
             if ch == '\n':
                 result.append('\\n')
                 continue
-            if ch == '\r':
+            elif ch == '\r':
                 result.append('\\r')
                 continue
-            if ch == '\t':
+            elif ch == '\t':
                 result.append('\\t')
                 continue
+            elif ord(ch) < 0x20:          # catch ALL other control characters
+                result.append(f'\\u{ord(ch):04x}')
+                continue
         result.append(ch)
+
+    # If response was truncated mid-string, close it gracefully
+    if in_string:
+        result.append('"')
+
     return ''.join(result)
 
 
@@ -221,11 +247,10 @@ def parse_review(raw: str) -> dict:
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as exc:
-        # Response was likely truncated — try to recover by closing open structures
         print(f"⚠️  JSON parse failed ({exc}), attempting recovery…", file=sys.stderr)
         recovered = _repair_truncated_json(json_str)
         print(f"⚠️  Recovered JSON (first 200 chars): {recovered[:200]}", file=sys.stderr)
-        return json.loads(recovered)   # raises if still broken
+        return json.loads(recovered)
 
 
 def _repair_truncated_json(s: str) -> str:
@@ -234,15 +259,7 @@ def _repair_truncated_json(s: str) -> str:
     1. Removing any incomplete trailing object or string value.
     2. Closing any unclosed arrays and objects.
     """
-    import re
-
-    # Step 1: truncate at the last complete top-level field value.
-    # Find the last safely-terminated value boundary: end of }, ], true, false, null, or a quoted string.
-    # Walk backwards from the end dropping chars until json.loads succeeds or we close open brackets.
-
-    # Count unclosed brackets to know what to close
     def count_open(text):
-        """Return (unclosed_braces, unclosed_brackets) ignoring content inside strings."""
         open_braces = 0
         open_brackets = 0
         in_string = False
@@ -269,21 +286,11 @@ def _repair_truncated_json(s: str) -> str:
                 open_brackets -= 1
         return open_braces, open_brackets
 
-    # Remove any trailing incomplete string (unclosed quote) and incomplete object/array element
-    # Strip trailing comma and partial token after last complete comma-separated value
-    # Strategy: repeatedly strip from end until last char is one of: }, ], ", digit, true, false, null
     trimmed = s.rstrip()
-
-    # Remove incomplete last item: cut back to the last ',' or '[' or '{' at the top level
-    # Simple heuristic: find last occurrence of complete value ending (}, ], or quoted string end)
-    # then close remaining open structures.
-
-    # Find the rightmost position where a complete value ends outside a string
-    last_good = len(trimmed)
+    last_complete_pos = 0
     in_string = False
     escape_next = False
     depth = 0
-    last_complete_pos = 0
 
     for i, ch in enumerate(trimmed):
         if escape_next:
@@ -295,7 +302,6 @@ def _repair_truncated_json(s: str) -> str:
         if ch == '"':
             in_string = not in_string
             if not in_string:
-                # end of a string — mark position if depth makes sense
                 last_complete_pos = i + 1
             continue
         if in_string:
@@ -306,20 +312,12 @@ def _repair_truncated_json(s: str) -> str:
             depth -= 1
             last_complete_pos = i + 1
         elif ch == ',' and depth <= 2:
-            # after a comma at shallow depth, prior content was complete
-            last_complete_pos = i  # don't include the comma yet
+            last_complete_pos = i
 
-    # Use last_complete_pos to truncate if it's before the end (i.e., trailing content was bad)
     cut = trimmed[:last_complete_pos].rstrip().rstrip(',')
-
-    # Now close any unclosed arrays/objects
     open_braces, open_brackets = count_open(cut)
-
-    # Close open brackets first (they are inner), then braces
     closing = ']' * max(0, open_brackets) + '}' * max(0, open_braces)
-    repaired = cut + closing
-
-    return repaired
+    return cut + closing
 
 
 def build_summary_table(review: dict) -> str:
@@ -343,7 +341,7 @@ def build_summary_table(review: dict) -> str:
 def post_github_review(review: dict) -> None:
     """Post the review to GitHub via the REST API."""
     token   = os.environ["GITHUB_TOKEN"]
-    repo    = os.environ["GITHUB_REPOSITORY"]       # e.g. "acme/myrepo"
+    repo    = os.environ["GITHUB_REPOSITORY"]
     pr_num  = os.environ["PR_NUMBER"]
 
     verdict_map = {
@@ -455,14 +453,14 @@ def main():
     )
 
     raw_response = message.content[0].text
-    print("Raw response:\n", raw_response)   # always log for debugging
+    print("Raw response:\n", raw_response)
 
     # ── 4. Parse response ────────────────────
     try:
         review = parse_review(raw_response)
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"ERROR parsing Claude response: {exc}", file=sys.stderr)
-        print(f"Response length: {len(raw_response)} chars — consider raising MAX_TOKENS if truncated", file=sys.stderr)
+        print(f"Response length: {len(raw_response)} chars", file=sys.stderr)
         sys.exit(1)
 
     # ── 5. Post or print ─────────────────────
