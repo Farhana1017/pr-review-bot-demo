@@ -8,6 +8,7 @@ import sys
 import json
 import subprocess
 import textwrap
+import re
 import requests
 import anthropic
 
@@ -23,12 +24,13 @@ SYSTEM_PROMPT_CSHARP = """
 You are a senior .NET / C# and SQL Server engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
 
-CRITICAL JSON RULES - YOU MUST FOLLOW THESE:
-1. Return ONLY raw JSON. No markdown fences, no ```json, no explanation.
-2. Every string value MUST be on a single line - absolutely no literal newlines inside strings.
-3. In 'suggestion' fields: escape ALL newlines as \\n, ALL double-quotes as \\", ALL backslashes as \\\\.
-4. Code examples in suggestions must be written as a single line with \\n for line breaks.
-5. Do not include raw code blocks inside JSON strings.
+CRITICAL JSON RULES - YOU MUST FOLLOW ALL OF THESE OR THE REVIEW WILL FAIL:
+1. Return ONLY raw JSON. Absolutely no markdown fences, no ```json, no explanation before or after.
+2. Every string value MUST be on a single line. NO literal newlines inside any string value whatsoever.
+3. In ALL string fields (message, suggestion, summary, github_comment): replace every newline with the two characters backslash-n (\\n), every double-quote with backslash-quote (\\"), every backslash with double-backslash (\\\\).
+4. Code examples in suggestion fields must be a single line with \\n for line breaks, NOT actual line breaks.
+5. Limit issues array to a maximum of 10 items. Pick the most critical ones only.
+6. The github_comment field must also be a single line with \\n for line breaks.
 
 Focus especially on:
 - SQL injection via string concatenation (must use parameterised queries / sp_executesql)
@@ -48,7 +50,7 @@ Focus especially on:
 
 Return exactly this JSON structure:
 {
-  "summary": "2-3 sentence overview of the changes and overall quality",
+  "summary": "2-3 sentence overview on a single line",
   "verdict": "approve" | "request_changes" | "comment",
   "score": <integer 0-100>,
   "issues": [
@@ -56,12 +58,12 @@ Return exactly this JSON structure:
       "line": <integer line number in the new file, or null>,
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Bug" | "Performance" | "Dispose/IDisposable" | "Async" | "DI/IoC" | "Style" | "Error Handling" | "Architecture" | "Documentation" | "T-SQL",
-      "message": "Clear description of the issue",
-      "suggestion": "Concrete fix with example code where helpful - use \\n for line breaks in code"
+      "message": "single line description",
+      "suggestion": "single line fix with \\n for any code line breaks"
     }
   ],
-  "positives": ["things done well"],
-  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables) - use \\n for line breaks"
+  "positives": ["single line item"],
+  "github_comment": "single line markdown with \\n for line breaks"
 }
 """
 
@@ -69,12 +71,13 @@ SYSTEM_PROMPT_SQL = """
 You are a senior SQL Server / T-SQL database engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
 
-CRITICAL JSON RULES - YOU MUST FOLLOW THESE:
-1. Return ONLY raw JSON. No markdown fences, no ```json, no explanation.
-2. Every string value MUST be on a single line - absolutely no literal newlines inside strings.
-3. In 'suggestion' fields: escape ALL newlines as \\n, ALL double-quotes as \\", ALL backslashes as \\\\.
-4. Code examples in suggestions must be written as a single line with \\n for line breaks.
-5. Do not include raw code blocks inside JSON strings.
+CRITICAL JSON RULES - YOU MUST FOLLOW ALL OF THESE OR THE REVIEW WILL FAIL:
+1. Return ONLY raw JSON. Absolutely no markdown fences, no ```json, no explanation before or after.
+2. Every string value MUST be on a single line. NO literal newlines inside any string value whatsoever.
+3. In ALL string fields: replace every newline with \\n, every double-quote with \\", every backslash with \\\\.
+4. Code examples in suggestion fields must be a single line with \\n for line breaks, NOT actual line breaks.
+5. Limit issues array to a maximum of 10 items. Pick the most critical ones only.
+6. The github_comment field must also be a single line with \\n for line breaks.
 
 Focus especially on:
 - Dynamic SQL built with string concatenation (sp_executesql with parameters is the correct pattern)
@@ -91,7 +94,7 @@ Focus especially on:
 
 Return exactly this JSON structure:
 {
-  "summary": "2-3 sentence overview of the changes and overall quality",
+  "summary": "2-3 sentence overview on a single line",
   "verdict": "approve" | "request_changes" | "comment",
   "score": <integer 0-100>,
   "issues": [
@@ -99,12 +102,12 @@ Return exactly this JSON structure:
       "line": <integer line number in the new file, or null>,
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Performance" | "Missing Index" | "Transaction" | "Error Handling" | "Style" | "Best Practice" | "Dynamic SQL",
-      "message": "Clear description of the T-SQL-specific issue",
-      "suggestion": "Concrete T-SQL fix or pattern - use \\n for line breaks in code"
+      "message": "single line description",
+      "suggestion": "single line fix with \\n for any code line breaks"
     }
   ],
-  "positives": ["things done well"],
-  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables) - use \\n for line breaks"
+  "positives": ["single line item"],
+  "github_comment": "single line markdown with \\n for line breaks"
 }
 """
 
@@ -112,19 +115,20 @@ SYSTEM_PROMPT_GENERAL = """
 You are a senior software engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object — no markdown fences, no explanation outside the JSON.
 
-CRITICAL JSON RULES - YOU MUST FOLLOW THESE:
-1. Return ONLY raw JSON. No markdown fences, no ```json, no explanation.
-2. Every string value MUST be on a single line - absolutely no literal newlines inside strings.
-3. In 'suggestion' fields: escape ALL newlines as \\n, ALL double-quotes as \\", ALL backslashes as \\\\.
-4. Code examples in suggestions must be written as a single line with \\n for line breaks.
-5. Do not include raw code blocks inside JSON strings.
+CRITICAL JSON RULES - YOU MUST FOLLOW ALL OF THESE OR THE REVIEW WILL FAIL:
+1. Return ONLY raw JSON. Absolutely no markdown fences, no ```json, no explanation before or after.
+2. Every string value MUST be on a single line. NO literal newlines inside any string value whatsoever.
+3. In ALL string fields: replace every newline with \\n, every double-quote with \\", every backslash with \\\\.
+4. Code examples in suggestion fields must be a single line with \\n for line breaks, NOT actual line breaks.
+5. Limit issues array to a maximum of 10 items. Pick the most critical ones only.
+6. The github_comment field must also be a single line with \\n for line breaks.
 
 Focus on: security vulnerabilities, logic errors, performance issues, missing error handling,
 code style, maintainability, and documentation gaps.
 
 Return exactly this JSON structure:
 {
-  "summary": "2-3 sentence overview of the changes and overall quality",
+  "summary": "2-3 sentence overview on a single line",
   "verdict": "approve" | "request_changes" | "comment",
   "score": <integer 0-100>,
   "issues": [
@@ -132,12 +136,12 @@ Return exactly this JSON structure:
       "line": <integer line number in the new file, or null>,
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Bug" | "Performance" | "Style" | "Error Handling" | "Logic" | "Documentation",
-      "message": "Clear description of the issue",
-      "suggestion": "Concrete fix or improvement - use \\n for line breaks in code"
+      "message": "single line description",
+      "suggestion": "single line fix with \\n for any code line breaks"
     }
   ],
-  "positives": ["things done well"],
-  "github_comment": "Full markdown-formatted comment for GitHub PR (use headings, code blocks, tables) - use \\n for line breaks"
+  "positives": ["single line item"],
+  "github_comment": "single line markdown with \\n for line breaks"
 }
 """
 
@@ -174,11 +178,33 @@ def pick_system_prompt(lang: str) -> str:
     }.get(lang, SYSTEM_PROMPT_GENERAL)
 
 
+def _preprocess_response(raw: str) -> str:
+    """
+    Aggressively clean the raw response before any JSON parsing.
+    Strips fences, finds the JSON block, then fixes newlines inside strings.
+    """
+    cleaned = raw.strip()
+
+    # Strip markdown fences
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', cleaned)
+    if fence_match:
+        cleaned = fence_match.group(1).strip()
+    else:
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    # Find outermost { ... }
+    start = cleaned.find("{")
+    end   = cleaned.rfind("}") + 1
+    if start == -1 or end == 0:
+        raise ValueError("No JSON object found in Claude response")
+
+    return cleaned[start:end]
+
+
 def _sanitize_json_strings(s: str) -> str:
     """
-    Replace literal control characters inside JSON string values with proper
-    JSON escape sequences. Also auto-closes an unclosed string if the response
-    was truncated mid-value.
+    Walk the raw JSON char-by-char and escape any literal control characters
+    found inside string values. Also auto-closes an unclosed string.
     """
     result = []
     in_string = False
@@ -207,117 +233,88 @@ def _sanitize_json_strings(s: str) -> str:
             elif ch == '\t':
                 result.append('\\t')
                 continue
-            elif ord(ch) < 0x20:          # catch ALL other control characters
+            elif ord(ch) < 0x20:
                 result.append(f'\\u{ord(ch):04x}')
                 continue
         result.append(ch)
 
-    # If response was truncated mid-string, close it gracefully
+    # Auto-close if truncated mid-string
     if in_string:
         result.append('"')
 
     return ''.join(result)
 
 
-def parse_review(raw: str) -> dict:
-    """Parse JSON from Claude's response, stripping any accidental fences."""
-    import re
-    cleaned = raw.strip()
-
-    # Strip markdown code fences (```json ... ``` or ``` ... ```)
-    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', cleaned)
-    if fence_match:
-        cleaned = fence_match.group(1).strip()
-    else:
-        for fence in ("```json", "```"):
-            cleaned = cleaned.replace(fence, "")
-        cleaned = cleaned.strip()
-
-    # Find the outermost { ... }
-    start = cleaned.find("{")
-    end   = cleaned.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError("No JSON object found in Claude response")
-
-    json_str = cleaned[start:end]
-
-    # Sanitize literal control characters inside JSON string values
-    json_str = _sanitize_json_strings(json_str)
-
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as exc:
-        print(f"⚠️  JSON parse failed ({exc}), attempting recovery…", file=sys.stderr)
-        recovered = _repair_truncated_json(json_str)
-        print(f"⚠️  Recovered JSON (first 200 chars): {recovered[:200]}", file=sys.stderr)
-        return json.loads(recovered)
-
-
 def _repair_truncated_json(s: str) -> str:
     """
-    Best-effort repair of a truncated JSON string by:
-    1. Removing any incomplete trailing object or string value.
-    2. Closing any unclosed arrays and objects.
+    Best-effort repair of truncated JSON — removes incomplete trailing content
+    and closes any unclosed arrays/objects.
     """
     def count_open(text):
-        open_braces = 0
-        open_brackets = 0
-        in_string = False
-        escape = False
+        open_braces = open_brackets = 0
+        in_str = esc = False
         for ch in text:
-            if escape:
-                escape = False
+            if esc:
+                esc = False
                 continue
-            if ch == '\\' and in_string:
-                escape = True
+            if ch == '\\' and in_str:
+                esc = True
                 continue
             if ch == '"':
-                in_string = not in_string
+                in_str = not in_str
                 continue
-            if in_string:
+            if in_str:
                 continue
-            if ch == '{':
-                open_braces += 1
-            elif ch == '}':
-                open_braces -= 1
-            elif ch == '[':
-                open_brackets += 1
-            elif ch == ']':
-                open_brackets -= 1
+            if ch == '{':   open_braces += 1
+            elif ch == '}': open_braces -= 1
+            elif ch == '[': open_brackets += 1
+            elif ch == ']': open_brackets -= 1
         return open_braces, open_brackets
 
     trimmed = s.rstrip()
-    last_complete_pos = 0
-    in_string = False
-    escape_next = False
+    last_good = 0
+    in_str = esc = False
     depth = 0
 
     for i, ch in enumerate(trimmed):
-        if escape_next:
-            escape_next = False
+        if esc:
+            esc = False
             continue
-        if ch == '\\' and in_string:
-            escape_next = True
+        if ch == '\\' and in_str:
+            esc = True
             continue
         if ch == '"':
-            in_string = not in_string
-            if not in_string:
-                last_complete_pos = i + 1
+            in_str = not in_str
+            if not in_str:
+                last_good = i + 1
             continue
-        if in_string:
+        if in_str:
             continue
         if ch in ('{', '['):
             depth += 1
         elif ch in ('}', ']'):
             depth -= 1
-            last_complete_pos = i + 1
+            last_good = i + 1
         elif ch == ',' and depth <= 2:
-            last_complete_pos = i
+            last_good = i
 
-    cut = trimmed[:last_complete_pos].rstrip().rstrip(',')
-    open_braces, open_brackets = count_open(cut)
-    closing = ']' * max(0, open_brackets) + '}' * max(0, open_braces)
-    return cut + closing
+    cut = trimmed[:last_good].rstrip().rstrip(',')
+    ob, obr = count_open(cut)
+    return cut + ']' * max(0, obr) + '}' * max(0, ob)
+
+
+def parse_review(raw: str) -> dict:
+    """Full pipeline: preprocess → sanitize → parse → repair if needed."""
+    json_str = _preprocess_response(raw)
+    json_str = _sanitize_json_strings(json_str)
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as exc:
+        print(f"⚠️  JSON parse failed ({exc}), attempting repair…", file=sys.stderr)
+        repaired = _repair_truncated_json(json_str)
+        print(f"⚠️  Repaired JSON (first 200 chars): {repaired[:200]}", file=sys.stderr)
+        return json.loads(repaired)
 
 
 def build_summary_table(review: dict) -> str:
@@ -340,9 +337,9 @@ def build_summary_table(review: dict) -> str:
 
 def post_github_review(review: dict) -> None:
     """Post the review to GitHub via the REST API."""
-    token   = os.environ["GITHUB_TOKEN"]
-    repo    = os.environ["GITHUB_REPOSITORY"]
-    pr_num  = os.environ["PR_NUMBER"]
+    token  = os.environ["GITHUB_TOKEN"]
+    repo   = os.environ["GITHUB_REPOSITORY"]
+    pr_num = os.environ["PR_NUMBER"]
 
     verdict_map = {
         "approve":         "APPROVE",
@@ -375,7 +372,7 @@ def post_github_review(review: dict) -> None:
 
 
 def print_local_report(review: dict) -> None:
-    """Pretty-print the review when running locally (no GitHub env vars)."""
+    """Pretty-print the review when running locally."""
     divider = "─" * 60
     print(f"\n{divider}")
     print(f"  CLAUDE PR REVIEW  |  Score: {review.get('score', 'N/A')}/100  |  Verdict: {review.get('verdict','').upper()}")
@@ -397,7 +394,7 @@ def print_local_report(review: dict) -> None:
 
     positives = review.get("positives", [])
     if positives:
-        print(f"\nPOSITIVES")
+        print("\nPOSITIVES")
         for p in positives:
             print(f"  ✓ {p}")
 
@@ -474,7 +471,7 @@ def main():
     else:
         print_local_report(review)
 
-    # Exit with non-zero if critical issues exist and verdict is request_changes
+    # Fail the check if critical issues found
     if review.get("verdict") == "request_changes":
         critical_count = sum(
             1 for i in review.get("issues", []) if i.get("severity") == "critical"
