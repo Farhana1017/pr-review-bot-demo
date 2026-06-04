@@ -19,24 +19,23 @@ import anthropic
 CLAUDE_MODEL = "claude-sonnet-4-5"
 MAX_TOKENS = 8096
 MAX_DIFF_CHARS = 15000
-MAX_ISSUES = 10          # hard cap enforced in code, not just prompt
+MAX_ISSUES = 8
 
 SYSTEM_PROMPT_CSHARP = """
 You are a senior .NET / C# and SQL Server engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object.
 
-CRITICAL JSON RULES:
-1. Return ONLY raw JSON. No markdown fences, no ```json, no text before or after the JSON.
-2. No literal newlines inside any string value. Use the two characters backslash-n to represent a newline.
-3. No code blocks inside JSON strings. Write code examples as plain text with backslash-n for line breaks.
-4. Return AT MOST 10 issues. Choose only the most critical ones.
-5. Keep suggestion fields short — one or two sentences maximum. No multi-line code samples.
+ABSOLUTE RULES — the output will be machine-parsed, any violation breaks the pipeline:
+1. Output raw JSON only. No markdown fences, no prose, nothing outside the JSON object.
+2. The issues array must contain AT MOST 8 entries. Prioritise by severity.
+3. Every JSON string value must be a single line. No newline characters of any kind inside strings.
+4. suggestion and message values must be plain English sentences only — no code, no backticks, no angle brackets, no special characters.
 
-Focus on: SQL injection, hardcoded secrets, missing IDisposable/using, missing DI, sync DB calls, SELECT *, missing null checks, missing try/catch, missing SET NOCOUNT ON, missing BEGIN TRY/CATCH, missing transactions, missing indexes, architecture violations, missing XML docs.
+Focus on: SQL injection, hardcoded secrets, missing IDisposable/using, missing DI, sync DB calls, SELECT *, missing null checks, missing try/catch, SET NOCOUNT ON, BEGIN TRY/CATCH, missing transactions, missing indexes, architecture, XML docs.
 
-Return exactly this JSON structure with no deviations:
+Return exactly:
 {
-  "summary": "2-3 sentence overview",
+  "summary": "plain text overview",
   "verdict": "approve" | "request_changes" | "comment",
   "score": <integer 0-100>,
   "issues": [
@@ -44,12 +43,12 @@ Return exactly this JSON structure with no deviations:
       "line": <integer or null>,
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Bug" | "Performance" | "Dispose/IDisposable" | "Async" | "DI/IoC" | "Style" | "Error Handling" | "Architecture" | "Documentation" | "T-SQL",
-      "message": "one sentence description",
-      "suggestion": "one sentence fix, no code blocks"
+      "message": "plain English, one sentence, no code",
+      "suggestion": "plain English, one sentence, no code"
     }
   ],
-  "positives": ["one sentence each"],
-  "github_comment": "markdown summary with backslash-n for line breaks, no raw newlines"
+  "positives": ["plain text"],
+  "github_comment": "plain text overview, no code blocks"
 }
 """
 
@@ -57,18 +56,17 @@ SYSTEM_PROMPT_SQL = """
 You are a senior SQL Server / T-SQL database engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object.
 
-CRITICAL JSON RULES:
-1. Return ONLY raw JSON. No markdown fences, no ```json, no text before or after the JSON.
-2. No literal newlines inside any string value. Use the two characters backslash-n to represent a newline.
-3. No code blocks inside JSON strings. Write code examples as plain text with backslash-n for line breaks.
-4. Return AT MOST 10 issues. Choose only the most critical ones.
-5. Keep suggestion fields short — one or two sentences maximum. No multi-line code samples.
+ABSOLUTE RULES — the output will be machine-parsed, any violation breaks the pipeline:
+1. Output raw JSON only. No markdown fences, no prose, nothing outside the JSON object.
+2. The issues array must contain AT MOST 8 entries. Prioritise by severity.
+3. Every JSON string value must be a single line. No newline characters of any kind inside strings.
+4. suggestion and message values must be plain English sentences only — no code, no backticks, no angle brackets, no special characters.
 
 Focus on: dynamic SQL concatenation, missing SET NOCOUNT ON, SELECT *, missing indexes, cursors vs set-based, missing transactions, missing BEGIN TRY/CATCH, implicit type conversions, missing schema prefix, missing semicolons.
 
-Return exactly this JSON structure with no deviations:
+Return exactly:
 {
-  "summary": "2-3 sentence overview",
+  "summary": "plain text overview",
   "verdict": "approve" | "request_changes" | "comment",
   "score": <integer 0-100>,
   "issues": [
@@ -76,12 +74,12 @@ Return exactly this JSON structure with no deviations:
       "line": <integer or null>,
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Performance" | "Missing Index" | "Transaction" | "Error Handling" | "Style" | "Best Practice" | "Dynamic SQL",
-      "message": "one sentence description",
-      "suggestion": "one sentence fix, no code blocks"
+      "message": "plain English, one sentence, no code",
+      "suggestion": "plain English, one sentence, no code"
     }
   ],
-  "positives": ["one sentence each"],
-  "github_comment": "markdown summary with backslash-n for line breaks, no raw newlines"
+  "positives": ["plain text"],
+  "github_comment": "plain text overview, no code blocks"
 }
 """
 
@@ -89,18 +87,17 @@ SYSTEM_PROMPT_GENERAL = """
 You are a senior software engineer performing a thorough code review.
 Analyse the provided git diff and return ONLY a valid JSON object.
 
-CRITICAL JSON RULES:
-1. Return ONLY raw JSON. No markdown fences, no ```json, no text before or after the JSON.
-2. No literal newlines inside any string value. Use the two characters backslash-n to represent a newline.
-3. No code blocks inside JSON strings. Write code examples as plain text with backslash-n for line breaks.
-4. Return AT MOST 10 issues. Choose only the most critical ones.
-5. Keep suggestion fields short — one or two sentences maximum. No multi-line code samples.
+ABSOLUTE RULES — the output will be machine-parsed, any violation breaks the pipeline:
+1. Output raw JSON only. No markdown fences, no prose, nothing outside the JSON object.
+2. The issues array must contain AT MOST 8 entries. Prioritise by severity.
+3. Every JSON string value must be a single line. No newline characters of any kind inside strings.
+4. suggestion and message values must be plain English sentences only — no code, no backticks, no angle brackets, no special characters.
 
 Focus on: security vulnerabilities, logic errors, performance issues, missing error handling, code style, maintainability, documentation gaps.
 
-Return exactly this JSON structure with no deviations:
+Return exactly:
 {
-  "summary": "2-3 sentence overview",
+  "summary": "plain text overview",
   "verdict": "approve" | "request_changes" | "comment",
   "score": <integer 0-100>,
   "issues": [
@@ -108,12 +105,12 @@ Return exactly this JSON structure with no deviations:
       "line": <integer or null>,
       "severity": "critical" | "warning" | "style" | "info",
       "category": "Security" | "Bug" | "Performance" | "Style" | "Error Handling" | "Logic" | "Documentation",
-      "message": "one sentence description",
-      "suggestion": "one sentence fix, no code blocks"
+      "message": "plain English, one sentence, no code",
+      "suggestion": "plain English, one sentence, no code"
     }
   ],
-  "positives": ["one sentence each"],
-  "github_comment": "markdown summary with backslash-n for line breaks, no raw newlines"
+  "positives": ["plain text"],
+  "github_comment": "plain text overview, no code blocks"
 }
 """
 
@@ -148,59 +145,77 @@ def pick_system_prompt(lang: str) -> str:
     }.get(lang, SYSTEM_PROMPT_GENERAL)
 
 
-def _strip_code_fences(s: str) -> str:
-    """Remove any ``` code fences that Claude snuck into string values."""
-    # Remove ```language...``` blocks entirely, keeping only the inner text
-    s = re.sub(r'```[a-z]*\n?', '', s)
-    s = re.sub(r'```', '', s)
-    return s
-
-
-def _sanitize_json_strings(s: str) -> str:
+def _nuke_code_blocks_in_strings(raw: str) -> str:
     """
-    Walk char-by-char and escape literal control characters inside JSON strings.
-    Also auto-closes an unclosed string if the response was truncated.
+    The most robust approach: instead of trying to escape newlines inside
+    JSON strings, we locate every JSON string value in the raw text and
+    flatten it — replacing real newlines with spaces and removing code fences.
+
+    This runs on the raw text BEFORE json.loads so we can fix what Claude broke.
     """
     result = []
-    in_string = False
-    escape_next = False
+    i = 0
+    n = len(raw)
 
-    for ch in s:
-        if escape_next:
-            result.append(ch)
-            escape_next = False
-            continue
-        if ch == '\\' and in_string:
-            result.append(ch)
-            escape_next = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            result.append(ch)
-            continue
-        if in_string:
-            if ch == '\n':
-                result.append('\\n')
-                continue
-            elif ch == '\r':
-                result.append('\\r')
-                continue
-            elif ch == '\t':
-                result.append('\\t')
-                continue
-            elif ord(ch) < 0x20:
-                result.append(f'\\u{ord(ch):04x}')
-                continue
-        result.append(ch)
+    while i < n:
+        ch = raw[i]
 
-    if in_string:
+        # Not inside a string — copy verbatim
+        if ch != '"':
+            result.append(ch)
+            i += 1
+            continue
+
+        # Start of a JSON string — collect until closing unescaped quote
+        result.append('"')
+        i += 1
+        string_chars = []
+
+        while i < n:
+            c = raw[i]
+
+            if c == '\\' and i + 1 < n:
+                # Escaped character — keep as-is
+                string_chars.append(c)
+                string_chars.append(raw[i + 1])
+                i += 2
+                continue
+
+            if c == '"':
+                # End of string
+                i += 1
+                break
+
+            # Real (unescaped) control characters inside a string — fix them
+            if c == '\n':
+                string_chars.append(' ')
+            elif c == '\r':
+                pass  # drop carriage returns
+            elif c == '\t':
+                string_chars.append(' ')
+            else:
+                string_chars.append(c)
+
+            i += 1
+
+        # Now clean up the collected string content:
+        # 1. Remove ``` fences and their language tags
+        content = ''.join(string_chars)
+        content = re.sub(r'```[a-zA-Z]*', '', content)
+        content = re.sub(r'```', '', content)
+        # 2. Collapse multiple spaces into one
+        content = re.sub(r'  +', ' ', content).strip()
+        # 3. Escape any remaining double-quotes inside the value
+        content = content.replace('"', '\\"')
+
+        result.append(content)
         result.append('"')
 
     return ''.join(result)
 
 
 def _repair_truncated_json(s: str) -> str:
-    """Close any unclosed arrays/objects in a truncated JSON string."""
+    """Close unclosed arrays/objects in a truncated JSON string."""
     def count_open(text):
         open_braces = open_brackets = 0
         in_str = esc = False
@@ -255,28 +270,22 @@ def _repair_truncated_json(s: str) -> str:
 
 
 def _enforce_limits(review: dict) -> dict:
-    """
-    Hard-cap issues to MAX_ISSUES and strip any leftover code fences
-    from string fields — enforced in code regardless of what Claude returned.
-    """
+    """Hard-cap issues array to MAX_ISSUES regardless of what Claude returned."""
     if "issues" in review:
         review["issues"] = review["issues"][:MAX_ISSUES]
-
-    # Strip code fences from suggestion and message fields
-    for issue in review.get("issues", []):
-        for field in ("suggestion", "message"):
-            if isinstance(issue.get(field), str):
-                issue[field] = _strip_code_fences(issue[field]).strip()
-
-    # Strip code fences from github_comment too
-    if isinstance(review.get("github_comment"), str):
-        review["github_comment"] = _strip_code_fences(review["github_comment"]).strip()
-
     return review
 
 
 def parse_review(raw: str) -> dict:
-    """Full pipeline: strip fences → extract JSON → sanitize → parse → repair → enforce limits."""
+    """
+    Full pipeline:
+      1. Strip outer markdown fences
+      2. Extract outermost { ... }
+      3. Flatten all string values (removes newlines + code fences)
+      4. json.loads
+      5. Repair if truncated
+      6. Enforce limits
+    """
     cleaned = raw.strip()
 
     # Strip outer markdown fences
@@ -284,7 +293,7 @@ def parse_review(raw: str) -> dict:
     if fence_match:
         cleaned = fence_match.group(1).strip()
     else:
-        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+        cleaned = re.sub(r'```[a-z]*', '', cleaned).replace('```', '').strip()
 
     # Extract outermost { ... }
     start = cleaned.find("{")
@@ -293,14 +302,16 @@ def parse_review(raw: str) -> dict:
         raise ValueError("No JSON object found in Claude response")
 
     json_str = cleaned[start:end]
-    json_str = _sanitize_json_strings(json_str)
+
+    # THE KEY FIX: flatten string values before parsing
+    json_str = _nuke_code_blocks_in_strings(json_str)
 
     try:
         review = json.loads(json_str)
     except json.JSONDecodeError as exc:
         print(f"⚠️  JSON parse failed ({exc}), attempting repair…", file=sys.stderr)
         repaired = _repair_truncated_json(json_str)
-        print(f"⚠️  Repaired JSON (first 200 chars): {repaired[:200]}", file=sys.stderr)
+        print(f"⚠️  Repaired (first 200 chars): {repaired[:200]}", file=sys.stderr)
         review = json.loads(repaired)
 
     return _enforce_limits(review)
@@ -311,16 +322,8 @@ def build_summary_table(review: dict) -> str:
     for issue in review.get("issues", []):
         sev = issue.get("severity", "info")
         counts[sev] = counts.get(sev, 0) + 1
-
-    rows = "\n".join(
-        f"| {sev.capitalize()} | {count} |"
-        for sev, count in counts.items()
-    )
-    return (
-        "| Severity | Count |\n"
-        "|----------|-------|\n"
-        f"{rows}"
-    )
+    rows = "\n".join(f"| {s.capitalize()} | {c} |" for s, c in counts.items())
+    return "| Severity | Count |\n|----------|-------|\n" + rows
 
 
 def post_github_review(review: dict) -> None:
@@ -334,21 +337,18 @@ def post_github_review(review: dict) -> None:
         "comment":         "COMMENT",
     }
     event = verdict_map.get(review.get("verdict", "comment"), "COMMENT")
-
-    score   = review.get("score", "N/A")
-    summary = build_summary_table(review)
-    body    = (
+    score = review.get("score", "N/A")
+    body  = (
         f"## Claude PR Review — Score: {score}/100\n\n"
-        f"{summary}\n\n"
+        f"{build_summary_table(review)}\n\n"
         f"{review.get('github_comment', '')}"
     )
 
-    url  = f"https://api.github.com/repos/{repo}/pulls/{pr_num}/reviews"
     resp = requests.post(
-        url,
+        f"https://api.github.com/repos/{repo}/pulls/{pr_num}/reviews",
         headers={
             "Authorization": f"Bearer {token}",
-            "Accept":        "application/vnd.github+json",
+            "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
         },
         json={"body": body, "event": event},
@@ -361,7 +361,7 @@ def post_github_review(review: dict) -> None:
 def print_local_report(review: dict) -> None:
     divider = "─" * 60
     print(f"\n{divider}")
-    print(f"  CLAUDE PR REVIEW  |  Score: {review.get('score', 'N/A')}/100  |  Verdict: {review.get('verdict','').upper()}")
+    print(f"  CLAUDE PR REVIEW  |  Score: {review.get('score','N/A')}/100  |  Verdict: {review.get('verdict','').upper()}")
     print(divider)
     print(f"\nSUMMARY\n{review.get('summary','')}\n")
 
@@ -378,10 +378,9 @@ def print_local_report(review: dict) -> None:
     else:
         print("✅  No issues found — clean code!")
 
-    positives = review.get("positives", [])
-    if positives:
+    if review.get("positives"):
         print("\nPOSITIVES")
-        for p in positives:
+        for p in review["positives"]:
             print(f"  ✓ {p}")
 
     print(f"\n{divider}\nGITHUB COMMENT PREVIEW\n{divider}")
