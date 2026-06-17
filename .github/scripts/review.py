@@ -12,7 +12,7 @@ import re
 import requests
 import anthropic
 
-CLAUDE_MODEL   = "claude-sonnet-4-5"
+CLAUDE_MODEL   = "claude-sonnet-4-6"
 MAX_TOKENS     = 4096
 MAX_DIFF_CHARS = 15000
 
@@ -27,31 +27,36 @@ ISSUE1_LINE: <integer or null>
 ISSUE1_SEVERITY: <critical|warning|style|info>
 ISSUE1_CATEGORY: <Security|Bug|Performance|Async|Dispose|DI|ErrorHandling|Style|Architecture|TSQL>
 ISSUE1_MESSAGE: <one sentence, no code>
-ISSUE1_SUGGESTION: <one sentence, no code>
+ISSUE1_SUGGESTION: <one sentence>
+ISSUE1_FIXED_CODE: <corrected code snippet, use /// as line separator>
 ISSUE2_LINE: <integer or null>
 ISSUE2_SEVERITY: <critical|warning|style|info>
 ISSUE2_CATEGORY: <Security|Bug|Performance|Async|Dispose|DI|ErrorHandling|Style|Architecture|TSQL>
 ISSUE2_MESSAGE: <one sentence, no code>
-ISSUE2_SUGGESTION: <one sentence, no code>
+ISSUE2_SUGGESTION: <one sentence>
+ISSUE2_FIXED_CODE: <corrected code snippet, use /// as line separator>
 ISSUE3_LINE: <integer or null>
 ISSUE3_SEVERITY: <critical|warning|style|info>
 ISSUE3_CATEGORY: <Security|Bug|Performance|Async|Dispose|DI|ErrorHandling|Style|Architecture|TSQL>
 ISSUE3_MESSAGE: <one sentence, no code>
-ISSUE3_SUGGESTION: <one sentence, no code>
+ISSUE3_SUGGESTION: <one sentence>
+ISSUE3_FIXED_CODE: <corrected code snippet, use /// as line separator>
 ISSUE4_LINE: <integer or null>
 ISSUE4_SEVERITY: <critical|warning|style|info>
 ISSUE4_CATEGORY: <Security|Bug|Performance|Async|Dispose|DI|ErrorHandling|Style|Architecture|TSQL>
 ISSUE4_MESSAGE: <one sentence, no code>
-ISSUE4_SUGGESTION: <one sentence, no code>
+ISSUE4_SUGGESTION: <one sentence>
+ISSUE4_FIXED_CODE: <corrected code snippet, use /// as line separator>
 ISSUE5_LINE: <integer or null>
 ISSUE5_SEVERITY: <critical|warning|style|info>
 ISSUE5_CATEGORY: <Security|Bug|Performance|Async|Dispose|DI|ErrorHandling|Style|Architecture|TSQL>
 ISSUE5_MESSAGE: <one sentence, no code>
-ISSUE5_SUGGESTION: <one sentence, no code>
+ISSUE5_SUGGESTION: <one sentence>
+ISSUE5_FIXED_CODE: <corrected code snippet, use /// as line separator>
 POSITIVES: <comma separated or none>
 COMMENT: <one sentence>
 
-Rules: max 5 issues, no newlines in any value, no code, no backticks anywhere.
+Rules: max 5 issues, no newlines in any value except ISSUE_FIXED_CODE which uses /// as line separator instead of newlines, no backticks anywhere.
 """
 
 
@@ -95,12 +100,18 @@ def parse_response(text: str) -> dict:
             line = int(line_val) if line_val.lower() != "null" else None
         except ValueError:
             line = None
+
+        # Convert /// separators back to real newlines for fixed code
+        fixed_code_raw = get(f"ISSUE{n}_FIXED_CODE")
+        fixed_code = fixed_code_raw.replace("///", "\n") if fixed_code_raw else ""
+
         issues.append({
             "line":       line,
             "severity":   get(f"ISSUE{n}_SEVERITY") or "info",
             "category":   get(f"ISSUE{n}_CATEGORY") or "Style",
             "message":    message,
             "suggestion": get(f"ISSUE{n}_SUGGESTION"),
+            "fixed_code": fixed_code,
         })
 
     return {
@@ -113,10 +124,24 @@ def parse_response(text: str) -> dict:
     }
 
 
+def detect_language(category: str, fixed_code: str) -> str:
+    """Detect language for syntax highlighting based on category or code content."""
+    if category == "TSQL":
+        return "sql"
+    csharp_patterns = ["using ", "async ", "await ", "var ", "public ", "private ",
+                       "protected ", "class ", "namespace ", "=> ", "SqlCommand",
+                       "SqlConnection", "IDisposable"]
+    for pattern in csharp_patterns:
+        if pattern in fixed_code:
+            return "csharp"
+    return "csharp"  # default for this bot's use case
+
+
 def build_github_body(review: dict) -> str:
     counts = {"critical": 0, "warning": 0, "style": 0, "info": 0}
     for issue in review["issues"]:
-        counts[issue.get("severity", "info")] = counts.get(issue.get("severity", "info"), 0) + 1
+        sev = issue.get("severity", "info")
+        counts[sev] = counts.get(sev, 0) + 1
 
     table = (
         "| Severity | Count |\n|----------|-------|\n"
@@ -126,18 +151,23 @@ def build_github_body(review: dict) -> str:
     issues_md = ""
     for i, iss in enumerate(review["issues"], 1):
         line_info = f" *(line {iss['line']})*" if iss.get("line") else ""
+        fixed_code = iss.get("fixed_code", "").strip()
+        lang = detect_language(iss.get("category", ""), fixed_code)
+        code_block = f"\n\n**Fixed Code:**\n```{lang}\n{fixed_code}\n```" if fixed_code else ""
+
         issues_md += (
             f"\n**{i}. [{iss['severity'].upper()}] {iss['category']}**{line_info}\n"
             f"{iss['message']}\n"
-            f"> {iss['suggestion']}\n"
+            f"> 💡 {iss['suggestion']}"
+            f"{code_block}\n"
         )
 
     positives_md = ""
     if review["positives"]:
-        positives_md = "\n## Positives\n" + "\n".join(f"- {p}" for p in review["positives"])
+        positives_md = "\n## ✅ Positives\n" + "\n".join(f"- {p}" for p in review["positives"])
 
     return (
-        f"## Claude PR Review — Score: {review['score']}/100\n\n"
+        f"## 🤖 Claude PR Review — Score: {review['score']}/100\n\n"
         f"{table}\n\n"
         f"**Summary:** {review['summary']}\n\n"
         f"## Issues\n{issues_md}{positives_md}"
@@ -178,6 +208,12 @@ def print_local_report(review: dict) -> None:
         if iss.get("suggestion"):
             for ln in textwrap.wrap(iss["suggestion"], 70):
                 print(f"     → {ln}")
+        if iss.get("fixed_code"):
+            print(f"     Fixed Code:")
+            print(f"     {'·' * 50}")
+            for ln in iss["fixed_code"].splitlines():
+                print(f"       {ln}")
+            print(f"     {'·' * 50}")
     if review["positives"]:
         print("\nPOSITIVES")
         for p in review["positives"]:
@@ -221,7 +257,7 @@ def main():
     raw = message.content[0].text
     print("Raw response:\n", raw)
 
-    # Verify the new prompt is working — raw must NOT start with ```json
+    # Verify the prompt is working — raw must NOT start with ```json
     if raw.strip().startswith("```"):
         print("ERROR: Claude returned JSON/markdown instead of plain text.", file=sys.stderr)
         print("This means the old review.py is still in the repo. Re-check the file.", file=sys.stderr)
