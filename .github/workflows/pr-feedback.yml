@@ -1,0 +1,55 @@
+# .github/workflows/pr-feedback.yml
+name: PR Review Feedback
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  record-feedback:
+    name: Record thumbs-down feedback
+    runs-on: ubuntu-latest
+    # Only run when a reaction is added to a comment by the github-actions bot
+    if: |
+      github.event.comment.user.login == 'github-actions[bot]' == false &&
+      contains(github.event.comment.body, 'Claude PR Review')
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      # Download the existing database so we can write to it
+      - name: Download review database
+        uses: actions/download-artifact@v4
+        with:
+          name: review-database
+          path: .github/data/
+        continue-on-error: true
+
+      - name: Record feedback
+        env:
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          COMMENT_ID:        ${{ github.event.comment.id }}
+          COMMENT_BODY:      ${{ github.event.comment.body }}
+          REVIEW_DB_PATH:    .github/data/reviews.db
+        run: python .github/scripts/feedback.py
+
+      - name: Upload updated database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-database
+          path: .github/data/reviews.db
+          retention-days: 90
+          overwrite: true
