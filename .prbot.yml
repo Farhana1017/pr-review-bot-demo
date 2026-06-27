@@ -1,0 +1,29 @@
+# .prbot.yml  — Claude PR Review Bot configuration
+severity_threshold: warning      # block merge on: critical | warning | style | info | none
+
+score_thresholds:
+  auto_approve: 85               # score >= this → APPROVE
+  auto_block: 40                 # score <= this → REQUEST_CHANGES (regardless of issues)
+
+ignored_paths:                   # never review these
+  - "**/*.generated.cs"
+  - "Migrations/**"
+  - "**/*Designer.cs"
+  - "wwwroot/**"
+
+language_rules:
+  csharp: strict                 # strict | standard | relaxed
+  sql: strict
+  python: standard
+
+checks:
+  test_coverage: true            # flag missing tests for new methods
+  dependency_scan: true          # flag new package additions
+  pr_description: true           # flag empty or very short PR descriptions
+  commit_messages: true          # enforce conventional commits
+
+labels:
+  enabled: true
+  critical_label: "review: critical"
+  approved_label: "review: approved"
+  needs_work_label: "review: needs-work"
